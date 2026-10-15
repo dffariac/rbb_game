@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import io
 import mimetypes
 import numbers
@@ -38,7 +40,7 @@ DASHBOARD_LOGO_CANDIDATES = [
 
 
 # ============================================================
-# PALETA RED BULL / RED BULL BRAGANTINO
+# PALETA DE CORES
 # ============================================================
 
 BRAGANTINO_NAVY = "#0B1F4D"
@@ -58,7 +60,7 @@ BRAGANTINO_DARK_GRAY = "#4D5A70"
 BRAGANTINO_LIGHT_GRAY = "#D1D5DB"
 
 
-# Nenhuma cor verde é utilizada.
+# Não há cores verdes nesta paleta.
 BRAND_PALETTE = [
     BRAGANTINO_NAVY,
     BRAGANTINO_RED,
@@ -160,6 +162,206 @@ SOCIOS_COLUMNS = {
 
 
 # ============================================================
+# AUTENTICAÇÃO
+# ============================================================
+
+DEFAULT_AUTH_ITERATIONS = 310_000
+
+
+def load_auth_config():
+    """
+    Carrega as credenciais dos Secrets do Streamlit.
+
+    A senha original não fica armazenada no código.
+    Somente o hash da senha fica nos Secrets.
+    """
+
+    try:
+        auth_config = st.secrets["auth"]
+
+        configured_username = str(
+            auth_config["username"]
+        ).strip()
+
+        salt = str(
+            auth_config["salt"]
+        ).strip()
+
+        password_hash = str(
+            auth_config["password_hash"]
+        ).strip()
+
+        try:
+            iterations = int(
+                auth_config["iterations"]
+            )
+        except Exception:
+            iterations = DEFAULT_AUTH_ITERATIONS
+
+        if not configured_username:
+            raise ValueError
+
+        if not salt:
+            raise ValueError
+
+        if not password_hash:
+            raise ValueError
+
+        if iterations < 100_000:
+            raise ValueError
+
+        return (
+            configured_username,
+            salt,
+            password_hash,
+            iterations,
+        )
+
+    except Exception:
+        st.error(
+            "A autenticação não está configurada. "
+            "Adicione a seção [auth] nos Secrets "
+            "do Streamlit."
+        )
+
+        st.stop()
+
+
+def verify_password(
+    password: str,
+    salt: str,
+    expected_hash: str,
+    iterations: int,
+) -> bool:
+    """
+    Calcula o hash da senha informada e compara
+    com o hash armazenado nos Secrets.
+    """
+
+    calculated_hash = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        iterations,
+    ).hex()
+
+    return hmac.compare_digest(
+        calculated_hash.lower(),
+        expected_hash.lower(),
+    )
+
+
+def require_authentication():
+    """
+    Bloqueia o dashboard até o usuário informar
+    credenciais válidas.
+    """
+
+    if st.session_state.get(
+        "authenticated",
+        False,
+    ):
+        return
+
+    (
+        configured_username,
+        salt,
+        expected_hash,
+        iterations,
+    ) = load_auth_config()
+
+    st.markdown(
+        """
+        <div style="
+            max-width: 480px;
+            margin: 90px auto 25px auto;
+            text-align: center;
+        ">
+            <h1>🔒 Acesso restrito</h1>
+            <p>
+                Informe suas credenciais para acessar
+                o dashboard.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.form(
+        "login_form",
+        clear_on_submit=False,
+    ):
+
+        username = st.text_input(
+            "Usuário",
+            autocomplete="username",
+        )
+
+        password = st.text_input(
+            "Senha",
+            type="password",
+            autocomplete="current-password",
+        )
+
+        submitted = st.form_submit_button(
+            "Entrar",
+            type="primary",
+            width="stretch",
+        )
+
+    if submitted:
+
+        username_is_valid = hmac.compare_digest(
+            username.strip(),
+            configured_username,
+        )
+
+        password_is_valid = verify_password(
+            password=password,
+            salt=salt,
+            expected_hash=expected_hash,
+            iterations=iterations,
+        )
+
+        if (
+            username_is_valid
+            and password_is_valid
+        ):
+
+            st.session_state[
+                "authenticated"
+            ] = True
+
+            st.rerun()
+
+        else:
+
+            st.error(
+                "Usuário ou senha inválidos."
+            )
+
+    # Não executa o restante do dashboard.
+    st.stop()
+
+
+def render_logout_button():
+    """
+    Exibe o botão para encerrar a sessão atual.
+    """
+
+    if st.sidebar.button(
+        "Sair",
+        width="stretch",
+    ):
+
+        st.session_state[
+            "authenticated"
+        ] = False
+
+        st.rerun()
+
+
+# ============================================================
 # NORMALIZAÇÃO E TRATAMENTO
 # ============================================================
 
@@ -225,6 +427,16 @@ def clean_text(series: pd.Series) -> pd.Series:
 
 
 def round_positive_number(value) -> int:
+    """
+    Arredonda uma quantidade positiva.
+
+    Exemplos:
+
+        735,49 -> 735
+        735,50 -> 736
+        735,89 -> 736
+    """
+
     return int(float(value) + 0.5)
 
 
@@ -244,16 +456,16 @@ def parse_number(value):
     if text == "":
         return None
 
-    # Exemplo: 1.842,50
+    # 1.842,50 -> 1842.50
     if "," in text and "." in text:
         text = text.replace(".", "")
         text = text.replace(",", ".")
 
-    # Exemplo: 1842,50
+    # 1842,50 -> 1842.50
     elif "," in text:
         text = text.replace(",", ".")
 
-    # Exemplo: 1.842
+    # 1.842 -> 1842
     elif re.fullmatch(
         r"\d{1,3}(?:\.\d{3})+",
         text,
@@ -262,6 +474,7 @@ def parse_number(value):
 
     try:
         return float(text)
+
     except ValueError:
         return None
 
@@ -275,6 +488,7 @@ def parse_quantity(series: pd.Series) -> pd.Series:
     )
 
     if values.isna().any():
+
         invalid_indexes = list(
             values[values.isna()].index[:5]
         )
@@ -333,6 +547,7 @@ def canonicalize_columns(
         ) in normalized_columns.items():
 
             if normalized_column in normalized_aliases:
+
                 found_column = original_column
                 break
 
@@ -369,6 +584,7 @@ def validate_nonempty(
     invalid_rows = df[column].eq("")
 
     if invalid_rows.any():
+
         raise ValueError(
             f"A fonte '{source_name}' possui "
             f"valores vazios na coluna '{column}'."
@@ -512,7 +728,8 @@ def read_excel_sources(
         engine="openpyxl",
     )
 
-    # Leitura das tabelas estruturadas criadas com Ctrl + T
+    # Lê tabelas estruturadas do Excel criadas
+    # com Ctrl + T.
     try:
         from openpyxl import load_workbook
 
@@ -548,10 +765,13 @@ def read_excel_sources(
                 ):
 
                     if header is None:
+
                         headers.append(
                             f"coluna_{index}"
                         )
+
                     else:
+
                         headers.append(
                             str(header).strip()
                         )
@@ -577,7 +797,7 @@ def read_excel_sources(
     except Exception:
         pass
 
-    # Leitura das abas
+    # Lê também as abas do Excel.
     for sheet_name, dataframe in sheets.items():
 
         sources[
@@ -684,6 +904,7 @@ def ordered_unique(
 
 
 def is_employee_plan(value) -> bool:
+
     plan_key = normalize_key(value)
 
     return (
@@ -696,12 +917,15 @@ def is_employee_plan(value) -> bool:
 
 
 # ============================================================
-# TEMA
+# TEMA DOS GRÁFICOS
 # ============================================================
 
 def get_configured_theme_mode() -> str:
     """
-    Lê o tema definido no Streamlit.
+    Tenta identificar o tema definido no Streamlit.
+
+    Se o tema estiver configurado como dark,
+    os totais serão brancos.
     """
 
     try:
@@ -770,7 +994,8 @@ def get_unique_segment_colors(
 ) -> dict:
 
     """
-    Garante que nenhuma cor se repita no mesmo gráfico.
+    Garante que as cores não se repitam dentro
+    do mesmo gráfico.
     """
 
     colors_by_segment = {}
@@ -816,7 +1041,9 @@ def get_unique_segment_colors(
 
                     if gray_candidate not in used_colors:
 
-                        selected_color = gray_candidate
+                        selected_color = (
+                            gray_candidate
+                        )
 
                     gray_index += 1
 
@@ -829,10 +1056,6 @@ def get_unique_segment_colors(
 def get_text_color_for_segment(
     background_color: str,
 ) -> str:
-
-    """
-    Define a cor dos valores dentro das colunas.
-    """
 
     color = background_color.lstrip("#")
 
@@ -983,7 +1206,7 @@ def image_to_data_uri(
 
 
 # ============================================================
-# GRÁFICO
+# GRÁFICO DE COLUNAS EMPILHADAS
 # ============================================================
 
 def create_stacked_chart(
@@ -994,7 +1217,7 @@ def create_stacked_chart(
     chart_title: str,
     segment_order: list[str] | None = None,
     segment_color_map: dict[str, str] | None = None,
-    chart_height: int = 540,
+    chart_height: int = 570,
     show_legend: bool = True,
     theme_mode: str = "light",
 ) -> go.Figure | None:
@@ -1154,40 +1377,34 @@ def create_stacked_chart(
         )
 
     # --------------------------------------------------------
-    # TOTAL NO TOPO DAS COLUNAS
+    # TOTAIS EM NEGRITO
     # --------------------------------------------------------
 
-    total_texts = [
-        f"<b>{format_quantity(total)}</b>"
-        for total in totals
-    ]
+    # O <b> reforça o negrito e a família
+    # Arial Black fornece uma segunda garantia visual.
+    for position, total in zip(
+        x_positions,
+        totals,
+    ):
 
-    figure.add_trace(
-        go.Scatter(
-            x=x_positions,
-            y=totals,
-            mode="text",
-            text=total_texts,
-            textposition="top center",
-            textfont=dict(
+        figure.add_annotation(
+            x=position,
+            y=total,
+            xref="x",
+            yref="y",
+            text=f"<b>{format_quantity(total)}</b>",
+            showarrow=False,
+            yshift=9,
+            font=dict(
                 size=14,
-
-                # Branco no modo escuro
-                # e azul-marinho no modo claro.
                 color=theme_colors["total_label"],
-
-                # Fonte pesada para deixar
-                # o total em negrito.
                 family="Arial Black, Arial, sans-serif",
             ),
-            cliponaxis=False,
-            hoverinfo="skip",
-            showlegend=False,
+            align="center",
         )
-    )
 
     # --------------------------------------------------------
-    # LOGOS DOS ADVERSÁRIOS
+    # LOGOS DOS ADVERSÁRIOS ABAIXO DO EIXO X
     # --------------------------------------------------------
 
     for position, category in enumerate(
@@ -1208,12 +1425,18 @@ def create_stacked_chart(
                 ),
                 x=position,
                 xref="x",
-                y=-0.035,
+
+                # A imagem fica na área inferior,
+                # abaixo das colunas.
+                y=0.08,
                 yref="paper",
+
                 sizex=0.30,
-                sizey=0.115,
+                sizey=0.11,
+
                 xanchor="center",
-                yanchor="top",
+                yanchor="middle",
+
                 sizing="contain",
                 layer="above",
             )
@@ -1228,7 +1451,7 @@ def create_stacked_chart(
             text=f"<b>{chart_title}</b>",
             x=0,
             xanchor="left",
-            y=0.99,
+            y=0.98,
             yanchor="top",
             font=dict(
                 size=19,
@@ -1239,7 +1462,8 @@ def create_stacked_chart(
 
         template="plotly_white",
 
-        # Transparente para funcionar nos dois modos.
+        # Fundo transparente para respeitar
+        # o tema claro ou escuro do Streamlit.
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
 
@@ -1251,12 +1475,11 @@ def create_stacked_chart(
         barmode="stack",
         height=chart_height,
 
-        # Espaço superior exclusivo para título
-        # e legenda.
+        # Espaço reservado para título e legenda.
         margin=dict(
             l=20,
             r=30,
-            t=185 if show_legend else 110,
+            t=170 if show_legend else 105,
             b=125,
         ),
 
@@ -1266,10 +1489,10 @@ def create_stacked_chart(
         legend=dict(
             orientation="h",
 
-            # A legenda fica acima da área das barras.
-            # Assim não sobrepõe os valores.
-            y=1.06,
-            yanchor="bottom",
+            # A legenda fica acima da área de dados.
+            # Isso evita que ela cubra os totais.
+            y=0.90,
+            yanchor="top",
 
             x=0,
             xanchor="left",
@@ -1324,7 +1547,7 @@ def create_stacked_chart(
         rangemode="tozero",
         range=[
             0,
-            maximum_total * 1.20,
+            maximum_total * 1.28,
         ],
     )
 
@@ -1343,41 +1566,19 @@ def main():
         layout="wide",
     )
 
-    # --------------------------------------------------------
-    # CABEÇALHO
-    # --------------------------------------------------------
-
-    header_title, header_logo = st.columns(
-        [9, 1]
-    )
-
-    with header_title:
-
-        st.title(
-            "📊 Dashboard de projeção e sócios"
-        )
-
-        st.caption(
-            "Projeção e acompanhamento de público "
-            "para os próximos jogos"
-        )
-
-    with header_logo:
-
-        dashboard_logo = find_dashboard_logo()
-
-        if dashboard_logo is not None:
-
-            st.image(
-                str(dashboard_logo),
-                width=110,
-            )
+    # A autenticação precisa acontecer antes
+    # de carregar o Excel e exibir o dashboard.
+    require_authentication()
 
     # --------------------------------------------------------
     # BARRA LATERAL
     # --------------------------------------------------------
 
     with st.sidebar:
+
+        render_logout_button()
+
+        st.divider()
 
         st.header(
             "Configurações"
@@ -1392,22 +1593,25 @@ def main():
             ],
             index=0,
             help=(
-                "No modo Escuro, os totais serão "
-                "exibidos em branco e em negrito. "
+                "No modo Escuro, os totais ficam "
+                "brancos e em negrito. "
                 "Se estiver usando o tema System, "
                 "selecione Escuro manualmente caso "
                 "o modo automático não identifique "
-                "corretamente o tema."
+                "o tema corretamente."
             ),
         )
 
         if label_theme_option == "Claro":
+
             theme_mode = "light"
 
         elif label_theme_option == "Escuro":
+
             theme_mode = "dark"
 
         else:
+
             theme_mode = get_configured_theme_mode()
 
         st.divider()
@@ -1450,11 +1654,41 @@ def main():
 
             excel_bytes = None
 
+    # --------------------------------------------------------
+    # CABEÇALHO
+    # --------------------------------------------------------
+
+    header_title, header_logo = st.columns(
+        [9, 1]
+    )
+
+    with header_title:
+
+        st.title(
+            "📊 Dashboard de projeção e sócios"
+        )
+
+        st.caption(
+            "Projeção e acompanhamento de público "
+            "para os próximos jogos"
+        )
+
+    with header_logo:
+
+        dashboard_logo = find_dashboard_logo()
+
+        if dashboard_logo is not None:
+
+            st.image(
+                str(dashboard_logo),
+                width=110,
+            )
+
     if excel_bytes is None:
 
         st.warning(
             "Envie um arquivo Excel pela barra "
-            "lateral ou coloque um arquivo em "
+            "lateral ou coloque o arquivo em "
             "data/dados.xlsx."
         )
 
@@ -1612,6 +1846,7 @@ def main():
         ]
     )
 
+    # Substitui o ID pelo nome do adversário.
     socios["Adversário"] = (
         socios["ID"].map(id_lookup)
     )
@@ -1707,7 +1942,7 @@ def main():
     ].copy()
 
     # --------------------------------------------------------
-    # KPIs
+    # INDICADORES
     # --------------------------------------------------------
 
     total_projection = (
@@ -1851,7 +2086,7 @@ def main():
         value_column="Quantidade",
         chart_title="Sócios por adversário e plano",
         segment_color_map=PLAN_COLOR_MAP,
-        chart_height=610,
+        chart_height=620,
         show_legend=True,
         theme_mode=theme_mode,
     )
