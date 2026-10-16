@@ -39,8 +39,18 @@ DASHBOARD_LOGO_CANDIDATES = [
 ]
 
 
+# Faixa do gráfico reservada para os logos.
+# As barras ocupam somente esta área vertical.
+BAR_DOMAIN_BOTTOM = 0.22
+BAR_DOMAIN_TOP = 0.82
+
+# Posição vertical dos logos, em coordenadas do papel.
+LOGO_Y_POSITION = 0.10
+LOGO_SIZE_Y = 0.12
+
+
 # ============================================================
-# PALETA DE CORES
+# PALETA RED BULL / RED BULL BRAGANTINO
 # ============================================================
 
 BRAGANTINO_NAVY = "#0B1F4D"
@@ -60,7 +70,7 @@ BRAGANTINO_DARK_GRAY = "#4D5A70"
 BRAGANTINO_LIGHT_GRAY = "#D1D5DB"
 
 
-# Não há cores verdes nesta paleta.
+# Nenhuma cor verde é utilizada.
 BRAND_PALETTE = [
     BRAGANTINO_NAVY,
     BRAGANTINO_RED,
@@ -170,10 +180,9 @@ DEFAULT_AUTH_ITERATIONS = 310_000
 
 def load_auth_config():
     """
-    Carrega as credenciais dos Secrets do Streamlit.
+    Carrega usuário e hash da senha dos Secrets.
 
     A senha original não fica armazenada no código.
-    Somente o hash da senha fica nos Secrets.
     """
 
     try:
@@ -217,7 +226,7 @@ def load_auth_config():
             iterations,
         )
 
-    except Exception:
+    except Exception as error:
         st.error(
             "A autenticação não está configurada. "
             "Adicione a seção [auth] nos Secrets "
@@ -234,8 +243,8 @@ def verify_password(
     iterations: int,
 ) -> bool:
     """
-    Calcula o hash da senha informada e compara
-    com o hash armazenado nos Secrets.
+    Calcula o hash da senha digitada e compara
+    com o hash salvo nos Secrets.
     """
 
     calculated_hash = hashlib.pbkdf2_hmac(
@@ -253,8 +262,8 @@ def verify_password(
 
 def require_authentication():
     """
-    Bloqueia o dashboard até o usuário informar
-    credenciais válidas.
+    Exibe a tela de login e bloqueia o dashboard
+    até o usuário ser autenticado.
     """
 
     if st.session_state.get(
@@ -340,7 +349,6 @@ def require_authentication():
                 "Usuário ou senha inválidos."
             )
 
-    # Não executa o restante do dashboard.
     st.stop()
 
 
@@ -428,13 +436,11 @@ def clean_text(series: pd.Series) -> pd.Series:
 
 def round_positive_number(value) -> int:
     """
-    Arredonda uma quantidade positiva.
+    Arredonda quantidades positivas.
 
-    Exemplos:
-
-        735,49 -> 735
-        735,50 -> 736
-        735,89 -> 736
+    735,49 -> 735
+    735,50 -> 736
+    735,89 -> 736
     """
 
     return int(float(value) + 0.5)
@@ -547,7 +553,6 @@ def canonicalize_columns(
         ) in normalized_columns.items():
 
             if normalized_column in normalized_aliases:
-
                 found_column = original_column
                 break
 
@@ -715,7 +720,9 @@ def prepare_socios(
 # LEITURA DO EXCEL
 # ============================================================
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(
+    show_spinner=False,
+)
 def read_excel_sources(
     file_bytes: bytes,
 ) -> dict[str, pd.DataFrame]:
@@ -728,8 +735,7 @@ def read_excel_sources(
         engine="openpyxl",
     )
 
-    # Lê tabelas estruturadas do Excel criadas
-    # com Ctrl + T.
+    # Lê tabelas estruturadas criadas com Ctrl + T.
     try:
         from openpyxl import load_workbook
 
@@ -741,7 +747,11 @@ def read_excel_sources(
 
         for worksheet in workbook.worksheets:
 
-            for table_name, table in worksheet.tables.items():
+            for table_name in worksheet.tables:
+
+                table = worksheet.tables[
+                    table_name
+                ]
 
                 rows = worksheet[
                     table.ref
@@ -797,7 +807,7 @@ def read_excel_sources(
     except Exception:
         pass
 
-    # Lê também as abas do Excel.
+    # Adiciona as abas.
     for sheet_name, dataframe in sheets.items():
 
         sources[
@@ -806,6 +816,191 @@ def read_excel_sources(
 
     return sources
 
+
+# ============================================================
+# LEITURA OPCIONAL DO POSTGRESQL
+# ============================================================
+
+def get_database_config():
+    try:
+        return st.secrets["database"]
+    except Exception:
+        return None
+
+
+def has_database_config() -> bool:
+    config = get_database_config()
+
+    if config is None:
+        return False
+
+    if "url" in config:
+        return bool(
+            str(config["url"]).strip()
+        )
+
+    required_fields = [
+        "host",
+        "name",
+        "user",
+        "password",
+    ]
+
+    return all(
+        field in config
+        and str(config[field]).strip()
+        for field in required_fields
+    )
+
+
+@st.cache_resource(
+    show_spinner=False,
+)
+def get_database_engine():
+    """
+    Cria uma conexão com PostgreSQL usando
+    credenciais em st.secrets.
+    """
+
+    try:
+        from sqlalchemy import URL, create_engine
+
+    except ImportError as error:
+        raise RuntimeError(
+            "SQLAlchemy não está instalado. "
+            "Adicione SQLAlchemy e psycopg2-binary "
+            "ao requirements.txt."
+        ) from error
+
+    config = get_database_config()
+
+    if config is None:
+        raise RuntimeError(
+            "A seção [database] não foi encontrada "
+            "nos Secrets."
+        )
+
+    if "url" in config:
+
+        database_url = str(
+            config["url"]
+        ).strip()
+
+        return create_engine(
+            database_url,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+        )
+
+    host = str(
+        config["host"]
+    ).strip()
+
+    port = int(
+        config.get(
+            "port",
+            5432,
+        )
+    )
+
+    database_name = str(
+        config["name"]
+    ).strip()
+
+    username = str(
+        config["user"]
+    ).strip()
+
+    password = str(
+        config["password"]
+    )
+
+    database_url = URL.create(
+        drivername="postgresql+psycopg2",
+        username=username,
+        password=password,
+        host=host,
+        port=port,
+        database=database_name,
+        query={
+            "sslmode": "require",
+        },
+    )
+
+    return create_engine(
+        database_url,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+    )
+
+
+@st.cache_data(
+    ttl=900,
+    show_spinner=False,
+)
+def read_database_sources():
+    """
+    Lê as tabelas do PostgreSQL.
+
+    Tabelas esperadas:
+
+        public.projecao
+        public.id_adversario
+        public.socios
+    """
+
+    from sqlalchemy import text
+
+    engine = get_database_engine()
+
+    queries = {
+        "Banco: Projeção": """
+            select
+                id,
+                adversario,
+                tipo,
+                quantidade
+            from public.projecao
+            order by id, tipo
+        """,
+
+        "Banco: Id": """
+            select
+                id,
+                adversario
+            from public.id_adversario
+            order by id
+        """,
+
+        "Banco: Sócios": """
+            select
+                id,
+                plano,
+                quantidade
+            from public.socios
+            order by id, plano
+        """,
+    }
+
+    sources = {}
+
+    with engine.connect() as connection:
+
+        for source_name, query in queries.items():
+
+            dataframe = pd.read_sql_query(
+                text(query),
+                connection,
+            )
+
+            sources[source_name] = dataframe
+
+    return sources
+
+
+# ============================================================
+# SELEÇÃO AUTOMÁTICA DAS FONTES
+# ============================================================
 
 def default_source_index(
     source_names: list[str],
@@ -904,7 +1099,6 @@ def ordered_unique(
 
 
 def is_employee_plan(value) -> bool:
-
     plan_key = normalize_key(value)
 
     return (
@@ -917,17 +1111,10 @@ def is_employee_plan(value) -> bool:
 
 
 # ============================================================
-# TEMA DOS GRÁFICOS
+# TEMA
 # ============================================================
 
 def get_configured_theme_mode() -> str:
-    """
-    Tenta identificar o tema definido no Streamlit.
-
-    Se o tema estiver configurado como dark,
-    os totais serão brancos.
-    """
-
     try:
         configured_theme = st.get_option(
             "theme.base"
@@ -994,8 +1181,8 @@ def get_unique_segment_colors(
 ) -> dict:
 
     """
-    Garante que as cores não se repitam dentro
-    do mesmo gráfico.
+    Garante que nenhuma cor se repita
+    dentro do mesmo gráfico.
     """
 
     colors_by_segment = {}
@@ -1206,7 +1393,7 @@ def image_to_data_uri(
 
 
 # ============================================================
-# GRÁFICO DE COLUNAS EMPILHADAS
+# GRÁFICO
 # ============================================================
 
 def create_stacked_chart(
@@ -1306,9 +1493,9 @@ def create_stacked_chart(
 
     figure = go.Figure()
 
-    # --------------------------------------------------------
+    # ========================================================
     # COLUNAS EMPILHADAS
-    # --------------------------------------------------------
+    # ========================================================
 
     for segment in segments:
 
@@ -1376,12 +1563,10 @@ def create_stacked_chart(
             )
         )
 
-    # --------------------------------------------------------
-    # TOTAIS EM NEGRITO
-    # --------------------------------------------------------
+    # ========================================================
+    # TOTAIS NO TOPO
+    # ========================================================
 
-    # O <b> reforça o negrito e a família
-    # Arial Black fornece uma segunda garantia visual.
     for position, total in zip(
         x_positions,
         totals,
@@ -1392,7 +1577,9 @@ def create_stacked_chart(
             y=total,
             xref="x",
             yref="y",
-            text=f"<b>{format_quantity(total)}</b>",
+            text=(
+                f"<b>{format_quantity(total)}</b>"
+            ),
             showarrow=False,
             yshift=9,
             font=dict(
@@ -1403,9 +1590,14 @@ def create_stacked_chart(
             align="center",
         )
 
-    # --------------------------------------------------------
-    # LOGOS DOS ADVERSÁRIOS ABAIXO DO EIXO X
-    # --------------------------------------------------------
+    # ========================================================
+    # LOGOS DOS ADVERSÁRIOS
+    # ========================================================
+    #
+    # Esta faixa está separada da área das barras.
+    # As barras começam em BAR_DOMAIN_BOTTOM.
+    # Os logos ficam abaixo, em y=0.10.
+    #
 
     for position, category in enumerate(
         categories
@@ -1418,21 +1610,29 @@ def create_stacked_chart(
         if logo_path is None:
             continue
 
+        logo_size_x = (
+            0.30
+            if len(categories) <= 6
+            else 0.22
+        )
+
         figure.add_layout_image(
             dict(
                 source=image_to_data_uri(
                     logo_path
                 ),
+
+                # Alinhamento horizontal com
+                # a coluna correspondente.
                 x=position,
                 xref="x",
 
-                # A imagem fica na área inferior,
-                # abaixo das colunas.
-                y=0.08,
+                # Faixa inferior exclusiva dos logos.
+                y=LOGO_Y_POSITION,
                 yref="paper",
 
-                sizex=0.30,
-                sizey=0.11,
+                sizex=logo_size_x,
+                sizey=LOGO_SIZE_Y,
 
                 xanchor="center",
                 yanchor="middle",
@@ -1442,16 +1642,16 @@ def create_stacked_chart(
             )
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # LAYOUT
-    # --------------------------------------------------------
+    # ========================================================
 
     figure.update_layout(
         title=dict(
             text=f"<b>{chart_title}</b>",
             x=0,
             xanchor="left",
-            y=0.98,
+            y=0.99,
             yanchor="top",
             font=dict(
                 size=19,
@@ -1462,8 +1662,8 @@ def create_stacked_chart(
 
         template="plotly_white",
 
-        # Fundo transparente para respeitar
-        # o tema claro ou escuro do Streamlit.
+        # Transparência para funcionar no claro
+        # e no escuro.
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
 
@@ -1475,34 +1675,30 @@ def create_stacked_chart(
         barmode="stack",
         height=chart_height,
 
-        # Espaço reservado para título e legenda.
+        # Espaço inferior para a faixa dos logos.
         margin=dict(
             l=20,
             r=30,
-            t=170 if show_legend else 105,
-            b=125,
+            t=150 if show_legend else 105,
+            b=90,
         ),
 
         bargap=0.25,
         showlegend=show_legend,
 
+        # A legenda fica na parte superior,
+        # separada da área ocupada pelas barras.
         legend=dict(
             orientation="h",
-
-            # A legenda fica acima da área de dados.
-            # Isso evita que ela cubra os totais.
-            y=0.90,
+            y=0.92,
             yanchor="top",
-
             x=0,
             xanchor="left",
-
             font=dict(
                 size=11,
                 color=theme_colors["legend"],
                 family="Arial, sans-serif",
             ),
-
             bgcolor="rgba(0,0,0,0)",
             borderwidth=0,
             traceorder="normal",
@@ -1512,10 +1708,12 @@ def create_stacked_chart(
         uniformtext_mode="hide",
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # EIXO X
-    # --------------------------------------------------------
+    # ========================================================
 
+    # O eixo permanece oculto, mas é usado para
+    # alinhar os logos horizontalmente.
     figure.update_xaxes(
         visible=False,
         showticklabels=False,
@@ -1523,6 +1721,10 @@ def create_stacked_chart(
         zeroline=False,
         showline=False,
         ticks="",
+        domain=[
+            0,
+            1,
+        ],
         range=[
             -0.6,
             max(
@@ -1532,10 +1734,15 @@ def create_stacked_chart(
         ],
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # EIXO Y
-    # --------------------------------------------------------
+    # ========================================================
 
+    # As barras ocupam somente a faixa entre
+    # 22% e 82% da altura do gráfico.
+    #
+    # A faixa abaixo de 22% fica reservada
+    # exclusivamente para os escudos.
     figure.update_yaxes(
         visible=False,
         showticklabels=False,
@@ -1544,6 +1751,10 @@ def create_stacked_chart(
         showline=False,
         ticks="",
         title_text=None,
+        domain=[
+            BAR_DOMAIN_BOTTOM,
+            BAR_DOMAIN_TOP,
+        ],
         rangemode="tozero",
         range=[
             0,
@@ -1566,8 +1777,7 @@ def main():
         layout="wide",
     )
 
-    # A autenticação precisa acontecer antes
-    # de carregar o Excel e exibir o dashboard.
+    # Login antes de carregar os dados.
     require_authentication()
 
     # --------------------------------------------------------
@@ -1594,11 +1804,7 @@ def main():
             index=0,
             help=(
                 "No modo Escuro, os totais ficam "
-                "brancos e em negrito. "
-                "Se estiver usando o tema System, "
-                "selecione Escuro manualmente caso "
-                "o modo automático não identifique "
-                "o tema corretamente."
+                "brancos e em negrito."
             ),
         )
 
@@ -1616,17 +1822,50 @@ def main():
 
         st.divider()
 
-        st.header(
-            "Fonte dos dados"
-        )
-
         uploaded_file = st.file_uploader(
-            "Envie o arquivo Excel",
+            "Enviar Excel manualmente",
             type=[
                 "xlsx",
                 "xlsm",
             ],
+            help=(
+                "Opcional. Se não for enviado um arquivo, "
+                "o aplicativo usará o banco configurado "
+                "ou o arquivo data/dados.xlsx."
+            ),
         )
+
+        database_available = (
+            has_database_config()
+        )
+
+        if database_available:
+
+            st.info(
+                "Fonte principal: banco de dados"
+            )
+
+            if st.button(
+                "Atualizar dados",
+                width="stretch",
+            ):
+
+                read_database_sources.clear()
+                get_database_engine.clear()
+
+                st.rerun()
+
+        else:
+
+            st.info(
+                "Fonte principal: Excel"
+            )
+
+    # --------------------------------------------------------
+    # CARREGAMENTO DOS DADOS
+    # --------------------------------------------------------
+
+    try:
 
         if uploaded_file is not None:
 
@@ -1634,9 +1873,25 @@ def main():
                 uploaded_file.getvalue()
             )
 
-            st.success(
-                f"Arquivo carregado: "
+            sources = read_excel_sources(
+                excel_bytes
+            )
+
+            data_source_label = (
+                f"Excel enviado: "
                 f"{uploaded_file.name}"
+            )
+
+        elif database_available:
+
+            with st.spinner(
+                "Carregando dados do banco..."
+            ):
+
+                sources = read_database_sources()
+
+            data_source_label = (
+                "Banco de dados"
             )
 
         elif DEFAULT_EXCEL.exists():
@@ -1645,14 +1900,38 @@ def main():
                 DEFAULT_EXCEL.read_bytes()
             )
 
-            st.info(
-                "Usando o arquivo padrão: "
+            sources = read_excel_sources(
+                excel_bytes
+            )
+
+            data_source_label = (
+                f"Arquivo padrão: "
                 f"{DEFAULT_EXCEL.name}"
             )
 
         else:
 
-            excel_bytes = None
+            sources = {}
+            data_source_label = ""
+
+    except Exception as error:
+
+        st.error(
+            "Não foi possível carregar os dados."
+        )
+
+        st.exception(error)
+        st.stop()
+
+    if not sources:
+
+        st.warning(
+            "Nenhuma fonte de dados foi encontrada. "
+            "Envie um Excel, configure o banco ou "
+            "coloque data/dados.xlsx."
+        )
+
+        st.stop()
 
     # --------------------------------------------------------
     # CABEÇALHO
@@ -1673,6 +1952,12 @@ def main():
             "para os próximos jogos"
         )
 
+        if data_source_label:
+
+            st.caption(
+                f"Fonte: {data_source_label}"
+            )
+
     with header_logo:
 
         dashboard_logo = find_dashboard_logo()
@@ -1684,53 +1969,17 @@ def main():
                 width=110,
             )
 
-    if excel_bytes is None:
-
-        st.warning(
-            "Envie um arquivo Excel pela barra "
-            "lateral ou coloque o arquivo em "
-            "data/dados.xlsx."
-        )
-
-        st.stop()
-
     # --------------------------------------------------------
-    # LEITURA DO EXCEL
+    # SELEÇÃO DAS FONTES
     # --------------------------------------------------------
-
-    try:
-
-        sources = read_excel_sources(
-            excel_bytes
-        )
-
-    except Exception as error:
-
-        st.error(
-            "Não foi possível ler o arquivo Excel."
-        )
-
-        st.exception(error)
-        st.stop()
-
-    if not sources:
-
-        st.error(
-            "Nenhuma aba ou tabela foi encontrada "
-            "no Excel."
-        )
-
-        st.stop()
 
     source_names = list(
         sources.keys()
     )
 
-    # --------------------------------------------------------
-    # SELEÇÃO DAS FONTES
-    # --------------------------------------------------------
-
     with st.sidebar:
+
+        st.divider()
 
         st.subheader(
             "Fontes das tabelas"
@@ -1807,7 +2056,7 @@ def main():
     except Exception as error:
 
         st.error(
-            "Não foi possível preparar os dados."
+            "Não foi possível preparar as tabelas."
         )
 
         st.exception(error)
@@ -1846,7 +2095,6 @@ def main():
         ]
     )
 
-    # Substitui o ID pelo nome do adversário.
     socios["Adversário"] = (
         socios["ID"].map(id_lookup)
     )
@@ -1905,8 +2153,7 @@ def main():
     if not selected_adversaries:
 
         st.warning(
-            "Selecione pelo menos um adversário "
-            "no filtro lateral."
+            "Selecione pelo menos um adversário."
         )
 
         st.stop()
@@ -1924,7 +2171,7 @@ def main():
     ].copy()
 
     # --------------------------------------------------------
-    # SEPARAÇÃO DO PLANO FUNCIONÁRIOS
+    # SEPARAÇÃO DOS FUNCIONÁRIOS
     # --------------------------------------------------------
 
     employee_mask = socios_filtered[
@@ -1942,7 +2189,7 @@ def main():
     ].copy()
 
     # --------------------------------------------------------
-    # INDICADORES
+    # KPIs
     # --------------------------------------------------------
 
     total_projection = (
@@ -2061,8 +2308,7 @@ def main():
     else:
 
         st.info(
-            "Não há dados de projeção para "
-            "o filtro selecionado."
+            "Não há dados de projeção."
         )
 
     # ========================================================
@@ -2075,8 +2321,7 @@ def main():
 
     st.caption(
         "Colunas empilhadas por plano. "
-        "O plano Funcionários aparece "
-        "em um gráfico separado."
+        "Funcionários aparecem separadamente."
     )
 
     socios_chart = create_stacked_chart(
@@ -2104,8 +2349,7 @@ def main():
     else:
 
         st.info(
-            "Não há dados de sócios regulares "
-            "para o filtro selecionado."
+            "Não há dados de sócios regulares."
         )
 
     # ========================================================
@@ -2117,8 +2361,7 @@ def main():
     )
 
     st.caption(
-        "Quantidade de funcionários "
-        "por adversário."
+        "Quantidade de funcionários por adversário."
     )
 
     employee_chart = create_stacked_chart(
@@ -2149,12 +2392,11 @@ def main():
     else:
 
         st.info(
-            "Não há registros do plano "
-            "Funcionários para o filtro selecionado."
+            "Não há registros de funcionários."
         )
 
     # ========================================================
-    # AVISOS
+    # AVISOS SOBRE LOGOS
     # ========================================================
 
     logos_missing = [
@@ -2169,8 +2411,6 @@ def main():
             "Logos não encontrados em "
             "assets/logos para: "
             + ", ".join(logos_missing)
-            + ". O gráfico continua "
-            "funcionando sem eles."
         )
 
     if find_dashboard_logo() is None:
@@ -2220,8 +2460,7 @@ def main():
         )
 
         st.write(
-            "Tabela de relacionamento "
-            "ID x adversário"
+            "Relacionamento ID x adversário"
         )
 
         st.dataframe(
